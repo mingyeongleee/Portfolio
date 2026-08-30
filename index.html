@@ -1940,11 +1940,19 @@
         this.data=data; this.index=i; this.el=document.getElementById(`work-${i}`);
         this.el.dataset.orientation=data.ratio>=1?'landscape':'portrait';
         this.canvas=this.el.querySelector('canvas');
+        // Keep the squeeze mesh on mobile, but use a much lighter grid there.
+        // Desktop preserves the original mesh density exactly.
+        this.mobileReducedMesh=MOBILE_STABLE_CANVAS;
         this.ctx=this.canvas.getContext('2d',{alpha:true,desynchronized:!MOBILE_STABLE_CANVAS});
         this.source=document.createElement('canvas');
         this.sctx=this.source.getContext('2d',{alpha:true,desynchronized:!MOBILE_STABLE_CANVAS});
-        this.cols=data.ratio>=1?Math.min(data.cols,10):Math.min(data.cols,7);
-        this.rows=data.ratio>=1?Math.min(data.rows,7):Math.min(data.rows,11);
+        if(this.mobileReducedMesh){
+          this.cols=data.ratio>=1?Math.min(data.cols,6):Math.min(data.cols,4);
+          this.rows=data.ratio>=1?Math.min(data.rows,4):Math.min(data.rows,7);
+        }else{
+          this.cols=data.ratio>=1?Math.min(data.cols,10):Math.min(data.cols,7);
+          this.rows=data.ratio>=1?Math.min(data.rows,7):Math.min(data.rows,11);
+        }
         this.title=data.title; this.particles=[]; this.springs=[];
         this.returning=false; this.returnProgress=0;
         this.lastSqueezeAt=0; this.excitedUntil=0;
@@ -1966,6 +1974,8 @@
         this.el.style.aspectRatio=`${data.width}/${data.height}`;
         this.el.style.width=data.ratio>=1?'min(21vw,340px)':'min(12vw,190px)';
         this.configureTextureSize();
+        this.ctx.imageSmoothingEnabled=true;
+        this.sctx.imageSmoothingEnabled=true;
         this.video.addEventListener('loadedmetadata',()=>{
           const vw=this.video.videoWidth||data.width;
           const vh=this.video.videoHeight||data.height;
@@ -2064,7 +2074,13 @@
         const den=su0*(sv1-sv2)+su1*(sv2-sv0)+su2*(sv0-sv1);
         if(Math.abs(den)<.0001)return;
         const ctx=this.ctx;
-        ctx.save();ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.lineTo(x2,y2);ctx.closePath();ctx.clip();
+        let cx0=x0,cy0=y0,cx1=x1,cy1=y1,cx2=x2,cy2=y2;
+        if(this.mobileReducedMesh){
+          const cx=(x0+x1+x2)/3, cy=(y0+y1+y2)/3, bleed=1.15*DPR;
+          const grow=(x,y)=>{const dx=x-cx,dy=y-cy,d=Math.hypot(dx,dy)||1;return [x+dx/d*bleed,y+dy/d*bleed];};
+          [cx0,cy0]=grow(x0,y0); [cx1,cy1]=grow(x1,y1); [cx2,cy2]=grow(x2,y2);
+        }
+        ctx.save();ctx.beginPath();ctx.moveTo(cx0,cy0);ctx.lineTo(cx1,cy1);ctx.lineTo(cx2,cy2);ctx.closePath();ctx.clip();
         const m11=((sv1-sv2)*x0+(sv2-sv0)*x1+(sv0-sv1)*x2)/den,
           m12=((sv1-sv2)*y0+(sv2-sv0)*y1+(sv0-sv1)*y2)/den,
           m21=((su2-su1)*x0+(su0-su2)*x1+(su1-su0)*x2)/den,
@@ -2192,7 +2208,14 @@
       activeDetailIndex=index;
       detailView.classList.toggle('is-landscape', Number(clip.ratio || 1) > 1);
       detailVideo.pause();
+      const mobileDetail=window.innerWidth<=820;
+      // Detail pages always use the original source. Mobile keeps metadata preload
+      // so opening the page stays responsive without swapping in a preview encode.
+      detailVideo.preload=mobileDetail?'metadata':'auto';
       detailVideo.src=clip.path;
+      detailVideo.dataset.fullSrc=clip.path;
+      detailVideo.dataset.previewSource='0';
+      detailVideo.onerror=null;
       detailVideo.loop=true;
       detailVideo.autoplay=true;
       detailVideo.muted=false;
@@ -2230,18 +2253,29 @@
         button.setAttribute('aria-label',`Play ${clip.title}`);
         const preview=document.createElement('video');
         preview.src=clip.previewPath||clip.path;
+        const mobileThumb=window.innerWidth<=820;
         preview.addEventListener('error',()=>{
           if(preview.dataset.fallback==='1')return;
           preview.dataset.fallback='1';
           preview.src=clip.path;
-          preview.play().catch(()=>{});
+          if(mobileThumb)preview.load();
+          else preview.play().catch(()=>{});
         });
         preview.muted=true;
         preview.defaultMuted=true;
-        preview.loop=true;
-        preview.autoplay=true;
+        preview.loop=!mobileThumb;
+        preview.autoplay=!mobileThumb;
         preview.playsInline=true;
         preview.preload='metadata';
+        if(mobileThumb){
+          preview.addEventListener('loadedmetadata',()=>{
+            try{
+              const target=Number.isFinite(preview.duration)&&preview.duration>0?Math.min(.08,preview.duration*.02):.04;
+              preview.currentTime=target;
+            }catch(e){}
+          },{once:true});
+          preview.addEventListener('seeked',()=>preview.pause(),{once:true});
+        }
         const label=document.createElement('span');
         label.textContent=clip.title;
         button.append(preview,label);
@@ -2254,7 +2288,7 @@
         });
         detailVariants.appendChild(button);
         detailThumbVideos.push(preview);
-        preview.play().catch(()=>{});
+        if(!mobileThumb)preview.play().catch(()=>{});
       });
     }
 
@@ -2676,7 +2710,8 @@
     let lastHomeRender=0;
     function animate(now=performance.now()){
       const covered=isDetailOpen()||isContactOpen()||document.body.classList.contains('menu-open');
-      if(!document.hidden&&!covered&&now-lastHomeRender>=1000/HOME_RENDER_FPS){
+      const targetHomeFPS=MOBILE_STABLE_CANVAS?18:HOME_RENDER_FPS;
+      if(!document.hidden&&!covered&&now-lastHomeRender>=1000/targetHomeFPS){
         lastHomeRender=now;
         meshes.forEach(m=>{
           if(m.homeActive!==false&&m.inRenderRange!==false)m.render(now);
@@ -4126,8 +4161,8 @@
     mesh.homeActive=active;
     mesh.el.classList.toggle('is-home-inactive',!active);
     mesh.el.setAttribute('aria-hidden',active?'false':'true');
-    if(active)mesh.ensureVideoLoaded();
-    else setPlayback(mesh,false);
+    if(active&&window.innerWidth>820)mesh.ensureVideoLoaded();
+    else if(!active)setPlayback(mesh,false);
   }
   function setPlayback(mesh,shouldPlay){
     shouldPlay=!!shouldPlay&&mesh.homeActive!==false&&!isCovered();
@@ -4152,8 +4187,13 @@
     const estimatedHalf=mesh.data.ratio>=1?180:140;
     mesh.inRenderRange=x>-estimatedHalf&&x<window.innerWidth+estimatedHalf&&
                        y>-estimatedHalf&&y<window.innerHeight+estimatedHalf;
-    mesh.inPlayRange=x>-220&&x<window.innerWidth+220&&
-                     y>-260&&y<window.innerHeight+260;
+    if(mobileLayout){
+      mesh.inPlayRange=x>-90&&x<window.innerWidth+90&&
+                       y>-110&&y<window.innerHeight+110;
+    }else{
+      mesh.inPlayRange=x>-220&&x<window.innerWidth+220&&
+                       y>-260&&y<window.innerHeight+260;
+    }
     if(!Number.isFinite(mesh.lastRouteX)||Math.abs(x-mesh.lastRouteX)>.12){
       mesh.el.style.left=x+'px';mesh.lastRouteX=x;
     }
@@ -4229,7 +4269,7 @@
     if(active){
       if(initialMobileLayout)placeMobileMesh(mesh,index,relative);
       else placeMesh(mesh,index,relative);
-      mesh.ensureVideoLoaded();
+      if(!initialMobileLayout)mesh.ensureVideoLoaded();
       setPlayback(mesh,mesh.inPlayRange);
     }else{
       mesh.video.pause();
@@ -4653,6 +4693,150 @@
       padding-right:2px !important;
       justify-content:flex-end !important;
       text-align:right !important;
+    }
+  }
+</style>
+
+
+
+<!-- Mobile reduced-mesh performance + detail-flow refinement v13. Desktop behavior remains unchanged. -->
+<style id="becca-mobile-performance-detail-v13">
+  @media (max-width:820px){
+    /* Mobile keeps the site's squeeze identity with a reduced mesh instead of
+       replacing it with a native video. Fewer cells lower GPU/CPU cost, and the
+       JS triangle bleed hides the sub-pixel mapping seams seen on some phones. */
+    #stage .video-object{
+      background:transparent !important;
+      contain:layout paint;
+    }
+    #stage .video-object canvas{
+      display:block !important;
+      width:100% !important;
+      height:100% !important;
+      background:transparent !important;
+    }
+
+    /* On phones the detail page is a strict reading flow. No fixed/absolute
+       title or copy can overlap a tall video or a multi-line project title. */
+    #detail-view,
+    #detail-view.is-landscape{
+      grid-template:none !important;
+      align-items:stretch !important;
+      justify-content:flex-start !important;
+      gap:0 !important;
+    }
+    body.detail-open #detail-view,
+    body.detail-open #detail-view.is-landscape{
+      display:flex !important;
+      flex-direction:column !important;
+    }
+    #detail-main-wrap,
+    #detail-view.is-landscape #detail-main-wrap{
+      order:1 !important;
+      position:relative !important;
+      display:flex !important;
+      align-items:flex-start !important;
+      justify-content:center !important;
+      flex:0 0 auto !important;
+      width:100% !important;
+      height:auto !important;
+      min-height:0 !important;
+      max-height:none !important;
+      margin:0 0 24px !important;
+      padding:0 !important;
+      overflow:visible !important;
+      transform:none !important;
+    }
+    #detail-video,
+    #detail-view:not(.is-landscape) #detail-video,
+    #detail-view.is-landscape #detail-video{
+      position:static !important;
+      display:block !important;
+      width:auto !important;
+      height:auto !important;
+      max-width:min(86vw,620px) !important;
+      max-height:54svh !important;
+      margin:0 auto !important;
+      object-fit:contain !important;
+      transform:none !important;
+    }
+    #detail-view.is-landscape #detail-video{
+      width:100% !important;
+      max-width:100% !important;
+      max-height:46svh !important;
+    }
+    #detail-heading,
+    #detail-view.is-landscape #detail-heading{
+      order:2 !important;
+      position:static !important;
+      inset:auto !important;
+      display:block !important;
+      width:100% !important;
+      max-width:100% !important;
+      margin:0 0 22px !important;
+      padding:0 !important;
+      transform:none !important;
+      align-self:auto !important;
+    }
+    #detail-title{
+      position:static !important;
+      inset:auto !important;
+      display:block !important;
+      width:100% !important;
+      max-width:100% !important;
+      margin:0 !important;
+      font-size:clamp(24px,7.2vw,34px) !important;
+      line-height:1.02 !important;
+      letter-spacing:-.055em !important;
+      overflow-wrap:normal !important;
+      word-break:normal !important;
+      transform:none !important;
+    }
+    #detail-clip-title{
+      position:static !important;
+      margin-top:9px !important;
+      font-size:11px !important;
+      line-height:1.2 !important;
+      transform:none !important;
+    }
+    #detail-description,
+    #detail-view.is-landscape #detail-description{
+      order:3 !important;
+      position:static !important;
+      inset:auto !important;
+      display:block !important;
+      width:100% !important;
+      max-width:100% !important;
+      max-height:none !important;
+      margin:0 0 24px !important;
+      padding:0 !important;
+      overflow:visible !important;
+      font-size:clamp(12px,3.25vw,14px) !important;
+      line-height:1.46 !important;
+      transform:none !important;
+    }
+    #detail-description .detail-project-copy,
+    #detail-description .detail-selected-copy{
+      margin-left:0 !important;
+      margin-right:0 !important;
+    }
+    #detail-variants,
+    #detail-variants.is-many,
+    #detail-view.is-landscape #detail-variants,
+    #detail-view.is-landscape #detail-variants.is-many{
+      order:4 !important;
+      position:static !important;
+      inset:auto !important;
+      flex:0 0 auto !important;
+      width:100% !important;
+      max-width:100% !important;
+      margin:0 !important;
+      padding:4px 0 10px !important;
+      transform:none !important;
+      align-self:auto !important;
+    }
+    .detail-thumb video{
+      object-fit:cover !important;
     }
   }
 </style>
